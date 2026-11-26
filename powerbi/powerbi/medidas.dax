@@ -1,0 +1,245 @@
+// =====================================================================
+// MEDIDAS E TABELAS CALCULADAS — Vitta Clínicas
+// Crie uma tabela "_Medidas" vazia (Página Inicial > Inserir Dados)
+// e cole cada medida nela. Organize por pasta de exibição, se quiser.
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// TABELA CALCULADA: Calendario  (marcar como tabela de datas)
+// ---------------------------------------------------------------------
+Calendario =
+ADDCOLUMNS (
+    CALENDAR ( DATE ( 2024, 1, 1 ), DATE ( 2027, 12, 31 ) ),
+    "Ano", YEAR ( [Date] ),
+    "NumMes", MONTH ( [Date] ),
+    "AnoMes", YEAR ( [Date] ) * 100 + MONTH ( [Date] )
+)
+
+
+// ---------------------------------------------------------------------
+// COLUNA CALCULADA em dim_unidade
+// Unidades abertas antes da janela de comparação (30/11/2024).
+// Usada para o "crescimento nas mesmas unidades".
+// ---------------------------------------------------------------------
+// Madura = IF ( dim_unidade[data_inauguracao] <= DATE ( 2024, 11, 30 ), "Sim", "Não" )
+
+
+// =====================================================================
+// PÁGINA 1 — DESEMPENHO DA REDE
+// =====================================================================
+
+Total Agendamentos = COUNTROWS ( agendamentos )
+
+Consultas Realizadas =
+CALCULATE ( [Total Agendamentos], agendamentos[status] = "Realizado" )
+
+Consultas Ano Anterior =
+CALCULATE ( [Consultas Realizadas], SAMEPERIODLASTYEAR ( Calendario[Date] ) )
+
+Crescimento Total (A/A) =
+DIVIDE ( [Consultas Realizadas] - [Consultas Ano Anterior], [Consultas Ano Anterior] )
+
+Consultas Mesmas Unidades =
+CALCULATE ( [Consultas Realizadas], dim_unidade[Madura] = "Sim" )
+
+Consultas Mesmas Unidades AA =
+CALCULATE (
+    [Consultas Realizadas],
+    dim_unidade[Madura] = "Sim",
+    SAMEPERIODLASTYEAR ( Calendario[Date] )
+)
+
+Crescimento Mesmas Unidades (A/A) =
+DIVIDE ( [Consultas Mesmas Unidades] - [Consultas Mesmas Unidades AA], [Consultas Mesmas Unidades AA] )
+
+Consultas Mes Anterior =
+CALCULATE ( [Consultas Realizadas], DATEADD ( Calendario[Date], -1, MONTH ) )
+
+Variacao Mensal =
+DIVIDE ( [Consultas Realizadas] - [Consultas Mes Anterior], [Consultas Mes Anterior] )
+
+Pacientes Atendidos (12 meses) =
+CALCULATE (
+    DISTINCTCOUNT ( agendamentos[id_paciente] ),
+    agendamentos[status] = "Realizado",
+    DATESINPERIOD ( Calendario[Date], MAX ( Calendario[Date] ), -12, MONTH )
+)
+
+
+// =====================================================================
+// PÁGINA 2 — AGENDA, CANAIS E NÃO COMPARECIMENTO
+// =====================================================================
+
+Cancelamentos =
+CALCULATE ( [Total Agendamentos], agendamentos[status] = "Cancelado" )
+
+Nao Comparecimentos =
+CALCULATE ( [Total Agendamentos], agendamentos[status] = "Não compareceu" )
+
+Agendamentos Encerrados =
+CALCULATE (
+    [Total Agendamentos],
+    agendamentos[status] IN { "Realizado", "Não compareceu" }
+)
+
+Taxa de Nao Comparecimento =
+DIVIDE ( [Nao Comparecimentos], [Agendamentos Encerrados] )
+
+Taxa de Cancelamento =
+DIVIDE ( [Cancelamentos], [Total Agendamentos] )
+
+Agendamentos Futuros =
+CALCULATE (
+    [Total Agendamentos],
+    agendamentos[status] IN { "Agendado", "Confirmado" }
+)
+
+Antecedencia Media (dias) =
+AVERAGEX (
+    agendamentos,
+    DATEDIFF ( agendamentos[data_criacao], agendamentos[data_hora_agendada], DAY )
+)
+
+Participacao do Canal =
+DIVIDE (
+    [Total Agendamentos],
+    CALCULATE ( [Total Agendamentos], ALL ( agendamentos[canal] ) )
+)
+
+
+// =====================================================================
+// PÁGINA 3 — UNIDADES E MAPA
+// =====================================================================
+
+Receita Liquida por Consulta =
+DIVIDE ( [Faturamento Liquido], [Consultas Realizadas] )
+
+Ranking Unidade por Receita =
+RANKX (
+    ALL ( dim_unidade[nome] ),
+    [Faturamento Liquido],
+    ,
+    DESC,
+    DENSE
+)
+
+
+// =====================================================================
+// PÁGINA 4 — CLÍNICOS E ESPECIALIDADES
+// =====================================================================
+
+Medicos Ativos =
+DISTINCTCOUNT ( agendamentos[id_medico] )
+
+Consultas por Medico =
+DIVIDE ( [Consultas Realizadas], [Medicos Ativos] )
+
+
+// =====================================================================
+// PÁGINA 5 — CONVÊNIOS E GLOSAS
+// =====================================================================
+
+Faturamento Bruto = SUM ( faturamento[valor_bruto] )
+
+Glosas = SUM ( faturamento[valor_glosa] )
+
+Taxa de Glosa = DIVIDE ( [Glosas], [Faturamento Bruto] )
+
+Ticket Medio = DIVIDE ( [Faturamento Bruto], [Consultas Realizadas] )
+
+Glosa Convenios =
+CALCULATE ( [Glosas], dim_convenio[tipo] = "Convênio" )
+
+Taxa de Glosa Convenios =
+DIVIDE (
+    [Glosa Convenios],
+    CALCULATE ( [Faturamento Bruto], dim_convenio[tipo] = "Convênio" )
+)
+
+
+// =====================================================================
+// PÁGINA 6 — FINANCEIRO, RECEBIMENTO E CAIXA
+// =====================================================================
+
+Faturamento Liquido = SUM ( faturamento[valor_liquido] )
+
+Recebido =
+CALCULATE ( [Faturamento Liquido], NOT ISBLANK ( faturamento[data_recebimento] ) )
+
+A Receber =
+CALCULATE ( [Faturamento Liquido], ISBLANK ( faturamento[data_recebimento] ) )
+
+A Receber em Atraso (mais de 30 dias) =
+CALCULATE (
+    [A Receber],
+    faturamento[data_emissao] < TODAY () - 30
+)
+
+Taxa de Recebimento =
+DIVIDE ( [Recebido], [Faturamento Liquido] )
+
+
+// =====================================================================
+// PÁGINA 7 — RESULTADO, CUSTOS E PONTO DE EQUILÍBRIO
+// (equivalente ao "cada CD se paga?" e ao "ponto de equilíbrio" do case)
+// =====================================================================
+
+Despesas Totais = SUM ( despesas[valor] )
+
+Custos Fixos =
+CALCULATE ( [Despesas Totais], despesas[tipo] = "Fixo" )
+
+Custos Variaveis =
+CALCULATE ( [Despesas Totais], despesas[tipo] = "Variável" )
+
+Margem de Contribuicao (%) =
+1 - DIVIDE ( [Custos Variaveis], [Faturamento Liquido] )
+
+Ponto de Equilibrio (R$) =
+DIVIDE ( [Custos Fixos], [Margem de Contribuicao (%)] )
+
+Folga sobre o Equilibrio (R$) =
+[Faturamento Liquido] - [Ponto de Equilibrio (R$)]
+
+Resultado (R$) =
+[Faturamento Liquido] - [Despesas Totais]
+
+Margem Liquida (%) =
+DIVIDE ( [Resultado (R$)], [Faturamento Liquido] )
+
+Unidades Acima do Equilibrio =
+COUNTROWS (
+    FILTER (
+        VALUES ( dim_unidade[nome] ),
+        CALCULATE ( [Folga sobre o Equilibrio (R$)] ) > 0
+    )
+)
+
+
+// =====================================================================
+// PÁGINA 8 (OPCIONAL) — OPERAÇÃO: ESPERA E PONTUALIDADE
+// =====================================================================
+
+Espera Media (min) =
+AVERAGEX (
+    atendimentos,
+    DATEDIFF ( atendimentos[data_hora_chegada], atendimentos[data_hora_inicio], MINUTE )
+)
+
+Atendimento Medio (min) =
+AVERAGEX (
+    atendimentos,
+    DATEDIFF ( atendimentos[data_hora_inicio], atendimentos[data_hora_fim], MINUTE )
+)
+
+Esperas Acima de 15 min (%) =
+DIVIDE (
+    COUNTROWS (
+        FILTER (
+            atendimentos,
+            DATEDIFF ( atendimentos[data_hora_chegada], atendimentos[data_hora_inicio], MINUTE ) > 15
+        )
+    ),
+    COUNTROWS ( atendimentos )
+)
