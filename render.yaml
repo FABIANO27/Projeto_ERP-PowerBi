@@ -1,0 +1,28 @@
+# Configuração dos dois serviços da Vitta Clínicas.
+# Crie com: Render > New + > Blueprint > escolha o repositório.
+services:
+  - type: web
+    name: vitta-erp
+    runtime: python
+    plan: free
+    region: virginia
+    buildCommand: pip install -r requirements.txt && python gerar_dados.py
+    startCommand: gunicorn --chdir erp --bind 0.0.0.0:$PORT exportacao:app
+    envVars:
+      - key: SECRET_KEY
+        sync: false
+      - key: EXPORT_TOKEN
+        sync: false
+
+  - type: web
+    name: vitta-painel
+    runtime: python
+    plan: free
+    region: virginia
+    buildCommand: pip install -r requirements-dashboard.txt
+    startCommand: streamlit run dashboard.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
+    envVars:
+      - key: EXPORT_TOKEN
+        sync: false
+      - key: ERP_URL
+        value: https://vitta-erp.onrender.com
