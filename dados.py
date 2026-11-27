@@ -1,5 +1,5 @@
 """
-Carrega as tabelas do ERP pela rota /exportar e prepara os dados do painel.
+Carrega os resumos agregados do ERP e prepara os dados do painel.
 
 Variáveis de ambiente:
   ERP_URL       endereço do ERP (padrão: https://vitta-erp.onrender.com)
@@ -14,77 +14,50 @@ import requests
 ERP_URL = os.environ.get("ERP_URL", "https://vitta-erp.onrender.com").rstrip("/")
 EXPORT_TOKEN = os.environ.get("EXPORT_TOKEN", "")
 
-TABELAS = ["agendamentos", "atendimentos", "faturamento", "despesas", "unidades",
-           "medicos", "especialidades", "procedimentos", "convenios"]
+RESUMOS = ["mensal", "especialidade", "canal", "convenio"]
 
 
-def baixar(tabela):
+def baixar(caminho):
     if not EXPORT_TOKEN:
         raise RuntimeError("A variável EXPORT_TOKEN não está definida neste serviço.")
-    resposta = requests.get(f"{ERP_URL}/exportar/{tabela}.csv",
+    resposta = requests.get(f"{ERP_URL}/exportar/{caminho}",
                             headers={"X-Token": EXPORT_TOKEN}, timeout=180)
     resposta.raise_for_status()
     return pd.read_csv(io.StringIO(resposta.text), sep=";")
 
 
 def preparar():
-    """Baixa as tabelas e devolve os DataFrames já unidos, prontos para o painel."""
-    t = {nome: baixar(nome) for nome in TABELAS}
-
-    unidades = t["unidades"][["id_unidade", "nome"]].rename(columns={"nome": "unidade"})
-    especialidades = t["especialidades"].rename(columns={"nome": "especialidade"})
-
-    ag = t["agendamentos"].copy()
-    ag["data"] = pd.to_datetime(ag["data_hora_agendada"])
-    ag = ag.merge(unidades, on="id_unidade", how="left")
-    ag = ag.merge(t["medicos"][["id_medico", "id_especialidade"]], on="id_medico", how="left")
-    ag = ag.merge(especialidades[["id_especialidade", "especialidade"]],
-                  on="id_especialidade", how="left")
-
-    at = t["atendimentos"][["id_atendimento", "id_agendamento"]]
-    fat = t["faturamento"].copy()
-    fat["data_emissao"] = pd.to_datetime(fat["data_emissao"])
-    fat["data_recebimento"] = pd.to_datetime(fat["data_recebimento"])
-    fat = fat.merge(at, on="id_atendimento", how="left")
-    fat = fat.merge(ag[["id_agendamento", "id_unidade", "unidade", "especialidade"]],
-                    on="id_agendamento", how="left")
-    fat = fat.merge(t["convenios"][["id_convenio", "nome"]].rename(columns={"nome": "convenio"}),
-                    on="id_convenio", how="left")
-
-    desp = t["despesas"].copy()
-    desp["competencia"] = pd.to_datetime(desp["competencia"])
-    desp = desp.merge(unidades, on="id_unidade", how="left")
-
-    return {"ag": ag, "fat": fat, "desp": desp}
+    """Baixa os resumos mensais do ERP. Cada um é pequeno, então o consumo de memória é baixo."""
+    dados = {}
+    for nome in RESUMOS:
+        df = baixar(f"resumo/{nome}.csv")
+        df["mes"] = pd.to_datetime(df["mes"] + "-01")
+        dados[nome] = df
+    return dados
 
 
 def filtrar(dados, ini, fim, unidades):
-    """Aplica o período e as unidades escolhidas em todas as tabelas."""
-    ag = dados["ag"]
-    fat = dados["fat"]
-    desp = dados["desp"]
-
-    ag = ag[(ag["data"].dt.date >= ini) & (ag["data"].dt.date <= fim)]
-    fat = fat[(fat["data_emissao"].dt.date >= ini) & (fat["data_emissao"].dt.date <= fim)]
-    desp = desp[(desp["competencia"].dt.date >= ini.replace(day=1))
-                & (desp["competencia"].dt.date <= fim)]
-
-    ag = ag[ag["unidade"].isin(unidades)]
-    fat = fat[fat["unidade"].isin(unidades)]
-    desp = desp[desp["unidade"].isin(unidades)]
-    return ag, fat, desp
+    """Filtra por meses inteiros e pelas unidades escolhidas."""
+    inicio = pd.Timestamp(ini.replace(day=1))
+    final = pd.Timestamp(fim)
+    filtrado = {}
+    for nome, df in dados.items():
+        mascara = (df["mes"] >= inicio) & (df["mes"] <= final) & (df["unidade"].isin(unidades))
+        filtrado[nome] = df[mascara]
+    return filtrado
 
 
-def indicadores(ag, fat):
-    realizadas = int((ag["status"] == "Realizado").sum())
-    nao_compareceu = int((ag["status"] == "Não compareceu").sum())
-    canceladas = int((ag["status"] == "Cancelado").sum())
+def indicadores(f):
+    m = f["mensal"]
+    realizadas = int(m["realizados"].sum())
+    nao_compareceu = int(m["nao_compareceu"].sum())
+    canceladas = int(m["cancelados"].sum())
+    total = int(m["agendados"].sum())
     encerradas = realizadas + nao_compareceu
-    total = len(ag)
-    bruto = float(fat["valor_bruto"].sum())
-    glosa = float(fat["valor_glosa"].sum())
-    liquido = float(fat["valor_liquido"].sum())
-    recebido = float(fat.loc[fat["data_recebimento"].notna(), "valor_liquido"].sum())
+    bruto = float(m["bruto"].sum())
+    glosa = float(m["glosa"].sum())
+    liquido = float(m["liquido"].sum())
+    recebido = float(m["recebido"].sum())
     return {
         "realizadas": realizadas,
         "total": total,
@@ -102,39 +75,39 @@ def indicadores(ag, fat):
     }
 
 
-def serie_mensal(ag):
-    ag = ag.assign(mes=ag["data"].dt.to_period("M").dt.to_timestamp())
-    return (ag[ag["status"] == "Realizado"].groupby("mes").size()
-            .rename("consultas").reset_index())
+def serie_mensal(f):
+    return (f["mensal"].groupby("mes", as_index=False)["realizados"].sum()
+            .rename(columns={"realizados": "consultas"}))
 
 
-def faturamento_mensal(fat):
-    fat = fat.assign(mes=fat["data_emissao"].dt.to_period("M").dt.to_timestamp())
-    return fat.groupby("mes")["valor_liquido"].sum().rename("liquido").reset_index()
+def faturamento_mensal(f):
+    return f["mensal"].groupby("mes", as_index=False)["liquido"].sum()
 
 
-def taxa_nao_comparecimento_por_especialidade(ag):
-    encerrados = ag[ag["status"].isin(["Realizado", "Não compareceu"])].copy()
-    encerrados["falta"] = encerrados["status"].eq("Não compareceu")
-    return (encerrados.groupby("especialidade")["falta"].mean()
-            .sort_values(ascending=False).rename("taxa").reset_index())
+def taxa_por_especialidade(f):
+    e = f["especialidade"].groupby("especialidade", as_index=False)[["realizados", "nao_compareceu"]].sum()
+    encerradas = (e["realizados"] + e["nao_compareceu"]).where(lambda s: s > 0)
+    e["taxa"] = e["nao_compareceu"] / encerradas
+    return e.dropna(subset=["taxa"]).sort_values("taxa", ascending=False)[["especialidade", "taxa"]]
 
 
-def canais(ag):
-    return ag.groupby("canal").size().rename("agendamentos").reset_index()
+def canais(f):
+    return f["canal"].groupby("canal", as_index=False)["agendados"].sum()
 
 
-def resultado_unidades(fat, desp):
+def por_convenio(f):
+    c = f["convenio"].groupby("convenio", as_index=False)[["bruto", "glosa", "liquido"]].sum()
+    c["taxa_glosa"] = c["glosa"] / c["bruto"].where(lambda s: s > 0)
+    return c.sort_values("taxa_glosa", ascending=False)
+
+
+def resultado_unidades(f):
     """Receita, custos e ponto de equilíbrio por unidade, no período filtrado."""
-    receita = fat.groupby("unidade")["valor_liquido"].sum().rename("receita")
-    custos = (desp.pivot_table(index="unidade", columns="tipo", values="valor",
-                               aggfunc="sum")
-              .reindex(columns=["Fixo", "Variável"], fill_value=0))
-    df = pd.DataFrame(receita).join(custos, how="outer").fillna(0)
-    df.columns = ["receita", "fixo", "variavel"]
-    df["resultado"] = df["receita"] - df["fixo"] - df["variavel"]
-    margem = 1 - df["variavel"] / df["receita"].where(df["receita"] > 0)
-    df["margem_contribuicao"] = margem
-    df["ponto_equilibrio"] = df["fixo"] / margem
-    df["folga"] = df["receita"] - df["ponto_equilibrio"]
-    return df.reset_index()
+    m = f["mensal"].groupby("unidade", as_index=False)[["liquido", "fixo", "variavel"]].sum()
+    m = m.rename(columns={"liquido": "receita"})
+    m["resultado"] = m["receita"] - m["fixo"] - m["variavel"]
+    margem = 1 - m["variavel"] / m["receita"].where(m["receita"] > 0)
+    m["margem_contribuicao"] = margem.where(margem > 0)
+    m["ponto_equilibrio"] = m["fixo"] / m["margem_contribuicao"]
+    m["folga"] = m["receita"] - m["ponto_equilibrio"]
+    return m
