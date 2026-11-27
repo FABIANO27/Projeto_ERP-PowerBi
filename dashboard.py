@@ -1,6 +1,6 @@
 """
 Painel de gestão da Vitta Clínicas, em Streamlit.
-Lê os dados do ERP pela rota de exportação, com filtros interativos.
+Lê os resumos mensais do ERP, com filtros interativos.
 
 Rodar localmente:  streamlit run dashboard.py
 """
@@ -22,10 +22,10 @@ def percentual(valor):
 
 st.set_page_config(page_title="Vitta Clínicas · Painel", layout="wide")
 st.title("Vitta Clínicas · Painel de gestão")
-st.caption("Dados do ERP. Tudo fictício, para fins de estudo.")
+st.caption("Dados do ERP, agregados por mês. Tudo fictício, para fins de estudo.")
 
 
-@st.cache_data(ttl=900, show_spinner="Carregando dados do ERP. A primeira vez pode levar alguns minutos...")
+@st.cache_data(ttl=900, show_spinner="Carregando dados do ERP...")
 def carregar():
     return dados.preparar()
 
@@ -37,14 +37,16 @@ except Exception as erro:
     st.info("Confira se o serviço do ERP está Live e se EXPORT_TOKEN é o mesmo nos dois serviços.")
     st.stop()
 
-todas_unidades = sorted(base["ag"]["unidade"].dropna().unique())
-data_min = base["ag"]["data"].min().date()
-data_max = base["ag"]["data"].max().date()
+mensal = base["mensal"]
+todas_unidades = sorted(mensal["unidade"].dropna().unique())
+data_min = mensal["mes"].min().date()
+data_max = (mensal["mes"].max() + pd.offsets.MonthEnd(0)).date()
 
 with st.sidebar:
     st.header("Filtros")
     periodo = st.date_input("Período", value=(data_min, data_max),
                             min_value=data_min, max_value=data_max)
+    st.caption("O período considera meses inteiros.")
     escolhidas = st.multiselect("Unidades", todas_unidades, default=todas_unidades)
     if st.button("Atualizar dados do ERP"):
         st.cache_data.clear()
@@ -58,8 +60,8 @@ if not escolhidas:
     st.stop()
 
 ini, fim = periodo
-ag, fat, desp = dados.filtrar(base, ini, fim, escolhidas)
-k = dados.indicadores(ag, fat)
+f = dados.filtrar(base, ini, fim, escolhidas)
+k = dados.indicadores(f)
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Consultas realizadas", f"{k['realizadas']:,}".replace(",", "."))
@@ -72,24 +74,24 @@ c6.metric("Taxa de glosa", percentual(k["taxa_glosa"]))
 aba_op, aba_fin, aba_uni = st.tabs(["Operação", "Financeiro", "Unidades e resultado"])
 
 with aba_op:
-    st.plotly_chart(px.line(dados.serie_mensal(ag), x="mes", y="consultas", markers=True,
+    st.plotly_chart(px.line(dados.serie_mensal(f), x="mes", y="consultas", markers=True,
                             title="Consultas realizadas por mês"))
     col1, col2 = st.columns(2)
     with col1:
-        taxa = dados.taxa_nao_comparecimento_por_especialidade(ag)
+        taxa = dados.taxa_por_especialidade(f)
         fig = px.bar(taxa, x="taxa", y="especialidade", orientation="h",
                      title="Não comparecimento por especialidade")
         fig.update_xaxes(tickformat=".0%")
         fig.update_layout(yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig)
     with col2:
-        st.plotly_chart(px.bar(dados.canais(ag), x="canal", y="agendamentos",
+        st.plotly_chart(px.bar(dados.canais(f), x="canal", y="agendados",
                                title="Agendamentos por canal"))
 
 with aba_fin:
     col1, col2 = st.columns(2)
     with col1:
-        st.plotly_chart(px.bar(dados.faturamento_mensal(fat), x="mes", y="liquido",
+        st.plotly_chart(px.bar(dados.faturamento_mensal(f), x="mes", y="liquido",
                                title="Faturamento líquido por mês (data de emissão)"))
     with col2:
         situacao = pd.DataFrame({"situação": ["Recebido", "A receber"],
@@ -98,20 +100,14 @@ with aba_fin:
                                title="Recebido x a receber"))
 
     st.subheader("Convênios e glosas")
-    por_convenio = (fat.groupby("convenio")
-                    .agg(bruto=("valor_bruto", "sum"),
-                         glosa=("valor_glosa", "sum"),
-                         liquido=("valor_liquido", "sum"))
-                    .reset_index())
-    por_convenio["taxa_glosa"] = por_convenio["glosa"] / por_convenio["bruto"]
-    st.dataframe(por_convenio.sort_values("taxa_glosa", ascending=False).round(2),
-                 hide_index=True)
+    convenios = dados.por_convenio(f).round(2)
+    st.dataframe(convenios, hide_index=True)
 
 with aba_uni:
-    if fat.empty or desp.empty:
-        st.info("Não há dados de faturamento ou despesas no período e nas unidades escolhidas.")
+    res = dados.resultado_unidades(f)
+    if res.empty:
+        st.info("Não há dados no período e nas unidades escolhidas.")
     else:
-        res = dados.resultado_unidades(fat, desp)
         st.metric("Unidades acima do ponto de equilíbrio",
                   f"{int((res['folga'] > 0).sum())} de {len(res)}")
         st.plotly_chart(px.bar(res.sort_values("resultado"), x="resultado", y="unidade",
